@@ -1,0 +1,212 @@
+# =====================================================================
+#  SpaceClaim PRE-SCRIPT : solid chassis -> midsurfaces + offset capture
+# =====================================================================
+#  Runs in SpaceClaim (2025 R2). Either run standalone (set STEP_FILE) or
+#  inside a Workbench Geometry cell that already has the solid loaded
+#  (leave STEP_FILE = None to use the current document).
+#
+#  For each solid body it:
+#    1. Finds the two skin faces (largest parallel, opposite planar pair) ->
+#       gives the THIN/offset axis, the thickness, the normal, the centroid.
+#       This reads real face normals, so tilted (65 deg) panels are handled.
+#    2. Midsurfaces the body along that axis.
+#    3. Records  body_name -> {normal, centroid, thickness}  to a sidecar
+#       JSON that acp_materials_rosettes.py reads to set each rosette Z.
+#    4. Flags bodies that are not clearly plate-like or fail to midsurface,
+#       instead of silently producing bad surfaces.
+#
+#  Everything is written to a LOG FILE too, so a walk-away run is safe:
+#  come back and read the log to see how far it got and what needs cleanup.
+#
+#  VALIDATE FIRST RUN: the SpaceClaim API calls flagged  # VERIFY  are the
+#  version-sensitive ones (midsurface + face normal). If one fails, the log
+#  dumps the real available names so we fix it in one pass.
+# =====================================================================
+
+import os, json, math
+
+# ---------------- CONFIG ----------------
+STEP_FILE   = None      # r"C:\path\chassis_solid.step"  (None = use current doc)
+OUT_DIR     = None      # None -> folder of STEP_FILE, or the temp/home folder
+SIDECAR     = "panel_offsets.json"
+LOGFILE     = "pre_midsurface_log.txt"
+PARALLEL_TOL   = 0.98   # |dot(n1,n2)| above this = parallel faces
+PLATE_ASPECT   = 3.0    # plate-like if (min face span / thickness) >= this
+SAVE_DOC       = True   # save the .scdoc after midsurfacing
+
+# ---------------- LOGGING ----------------
+def _outdir():
+    if OUT_DIR:
+        return OUT_DIR
+    if STEP_FILE:
+        return os.path.dirname(STEP_FILE)
+    return os.path.expanduser("~")
+
+_LOGPATH = os.path.join(_outdir(), LOGFILE)
+_logbuf = []
+def log(msg):
+    line = str(msg)
+    _logbuf.append(line)
+    try:
+        with open(_LOGPATH, "w") as f:
+            f.write("\n".join(_logbuf))
+    except Exception:
+        pass
+    try:
+        print(line)
+    except Exception:
+        pass
+
+log("=== PRE midsurface capture ===")
+
+# ---------------- vector helpers ----------------
+def dot(a, b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+def sub(a, b): return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+def mid(a, b): return ((a[0]+b[0])/2.0, (a[1]+b[1])/2.0, (a[2]+b[2])/2.0)
+def norm(a):
+    m = math.sqrt(dot(a, a))
+    return None if m < 1e-12 else (a[0]/m, a[1]/m, a[2]/m)
+
+# ---------------- SpaceClaim accessors (VERIFY on first run) ----------------
+def face_normal(face):
+    """Unit global normal of a planar IDesignFace."""
+    g = face.Shape.Geometry                      # VERIFY: Plane for planar face
+    if type(g).__name__ != "Plane":
+        return None
+    d = g.Frame.DirZ                             # VERIFY: plane normal
+    n = (d.X, d.Y, d.Z)
+    try:
+        if face.Shape.IsReversed:                # face may flip the plane normal
+            n = (-n[0], -n[1], -n[2])
+    except Exception:
+        pass
+    return norm(n)
+
+def face_area(face):
+    try:
+        return face.Shape.Area
+    except Exception:
+        return 0.0
+
+def face_centroid(face):
+    try:
+        bb = face.Shape.GetBoundingBox(Matrix.Identity)   # VERIFY
+        c = bb.Center
+        return (c.X, c.Y, c.Z)
+    except Exception:
+        try:
+            p = face.Shape.EvalMid().Point
+            return (p.X, p.Y, p.Z)
+        except Exception:
+            return None
+
+def body_name(b):
+    for attr in ("GetName", "Name"):
+        try:
+            v = getattr(b, attr)
+            return v() if callable(v) else v
+        except Exception:
+            pass
+    return "Body"
+
+# ---------------- import ----------------
+try:
+    if STEP_FILE:
+        try:
+            opts = ImportOptions.Create()
+            DocumentOpen.Execute(STEP_FILE, opts)               # VERIFY
+        except Exception:
+            DocumentOpen.Execute(STEP_FILE)
+        log("Opened: %s" % STEP_FILE)
+    else:
+        log("Using current document (no STEP_FILE set).")
+except Exception as e:
+    log("IMPORT FAILED: %s" % e)
+    raise
+
+# ---------------- analyze + midsurface each body ----------------
+try:
+    bodies = list(GetRootPart().GetAllBodies())                 # VERIFY
+except Exception as e:
+    log("Could not list bodies: %s" % e)
+    raise
+
+log("Found %d bodies." % len(bodies))
+sidecar = {}
+flagged = []
+ms_ok, ms_fail = 0, 0
+
+for b in bodies:
+    name = body_name(b)
+    try:
+        planars = []
+        for f in b.Faces:
+            n = face_normal(f)
+            if n is None:
+                continue
+            planars.append((face_area(f), n, face_centroid(f), f))
+        if len(planars) < 2:
+            flagged.append("%s: <2 planar faces (not plate-like?)" % name)
+            continue
+        planars.sort(reverse=True, key=lambda x: x[0])
+        a0, n0, c0, f0 = planars[0]
+        pair = None
+        for (a, n, c, f) in planars[1:]:
+            if c is not None and c0 is not None and abs(dot(n, n0)) > PARALLEL_TOL:
+                pair = (a, n, c, f); break
+        if pair is None:
+            flagged.append("%s: no parallel opposite skin face found" % name)
+            continue
+        a1, n1, c1, f1 = pair
+        thickness = abs(dot(sub(c1, c0), n0))
+        face_span = math.sqrt(max(a0, a1))
+        if thickness < 1e-9 or (face_span / thickness) < PLATE_ASPECT:
+            flagged.append("%s: not clearly plate-like (span/thk=%.1f)"
+                           % (name, (face_span / thickness) if thickness > 0 else 0))
+            # still record the normal; just flag it
+        sidecar[name] = {"normal": [n0[0], n0[1], n0[2]],
+                         "centroid": list(mid(c0, c1)),
+                         "thickness": thickness}
+        log("%s: normal=(%.3f,%.3f,%.3f) thk=%.2f" % (name, n0[0], n0[1], n0[2], thickness))
+
+        # midsurface this body between its two skin faces  # VERIFY API
+        try:
+            sel = FaceSelection.Create([f0, f1])
+            MidSurface.Create(sel)
+            ms_ok += 1
+        except Exception as e:
+            ms_fail += 1
+            flagged.append("%s: MidSurface.Create FAILED: %s" % (name, e))
+            log("   midsurface API names: %s"
+                % [x for x in dir() if "mid" in x.lower() or "surface" in x.lower()])
+    except Exception as e:
+        flagged.append("%s: analyze error: %s" % (name, e))
+
+# ---------------- write sidecar ----------------
+side_path = os.path.join(_outdir(), SIDECAR)
+try:
+    with open(side_path, "w") as f:
+        json.dump(sidecar, f, indent=2)
+    log("Sidecar written: %s (%d panels)" % (side_path, len(sidecar)))
+except Exception as e:
+    log("Sidecar write FAILED: %s" % e)
+
+# ---------------- save doc ----------------
+if SAVE_DOC and STEP_FILE:
+    try:
+        scdoc = os.path.splitext(STEP_FILE)[0] + "_mid.scdoc"
+        DocumentSave.Execute(scdoc)                              # VERIFY
+        log("Saved: %s" % scdoc)
+    except Exception as e:
+        log("Save FAILED: %s" % e)
+
+# ---------------- summary ----------------
+log("--- SUMMARY ---")
+log("midsurfaced OK: %d   failed: %d   panels recorded: %d" % (ms_ok, ms_fail, len(sidecar)))
+if flagged:
+    log("FLAGGED (need a look):")
+    for x in flagged:
+        log("  " + x)
+else:
+    log("no bodies flagged.")
+log("=== done. full log at: %s ===" % _LOGPATH)
