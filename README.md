@@ -312,6 +312,9 @@ Take a section cut through each gap and look at the wall:
 
 Update the ACP model, then return to Workbench to continue with the structural analyses.
 
+<img width="1484" height="896" alt="image" src="https://github.com/user-attachments/assets/9f73a316-3284-4284-a62c-d52c181f779e" />
+
+
 ## Notes
 
 - Run each ACP script once on a clean ACP model.
