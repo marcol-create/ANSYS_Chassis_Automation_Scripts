@@ -169,7 +169,8 @@ Open the ACP Mechanical model and generate the chassis mesh.
 
 Choose the element size and any local refinement appropriate for your analysis.
 
-<img width="2560" height="1540" alt="image" src="https://github.com/user-attachments/assets/cd505e9f-45f0-4a9a-a5b1-fe7f8f1bc9b8" />
+<img width="2072" height="1078" alt="image" src="https://github.com/user-attachments/assets/e7001eef-62e3-4401-8183-e65d642ac99d" />
+
 
 ## 3. Create the Gap Edge Sets (optional, for flush gaps)
 
