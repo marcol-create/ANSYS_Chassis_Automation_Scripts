@@ -322,7 +322,7 @@ Update the ACP model, then return to Workbench to continue with the structural a
 - Run each ACP script once on a clean ACP model.
 - Generate the chassis mesh before running the ACP scripts.
 - Create the `EdgeSet1` through `EdgeSet4` named selections (three edges each) before running `acp_gap_extrusion_guides.py`, and update the ACP (Pre) setup so they propagate.
-- The seat body must be named `Seat` for the flush-gap script to find it.
+- The seat body must be named `Seat` for the flush-gap script to find it or use the adaptive extrusion guides which selects any edge set (recommended). 
 - The bumper meshes are generated automatically by `workbench_setup(bumpers_included).py`.
 - The rollcage is merged into one body and meshed at 10 mm automatically by `workbench_setup(with_rollcage).py`.
 - All ACP objects are linked by matching names, so avoid renaming element sets after the initial setup.
